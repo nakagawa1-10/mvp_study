@@ -82,17 +82,24 @@ namespace UniRx
             return inputField.onEndEdit.AsObservable();
         }
 
-#if (UNITY_4_6 || UNITY_4_7 || UNITY_5_0 || UNITY_5_1 || UNITY_5_2)
         /// <summary>Observe onValueChange with current `text` value on subscribe.</summary>
+#if !(UNITY_4_6 || UNITY_4_7 || UNITY_5_0 || UNITY_5_1 || UNITY_5_2)
+        [Obsolete("onValueChange has been renamed to onValueChanged")]
+#endif
         public static IObservable<string> OnValueChangeAsObservable(this InputField inputField)
         {
             return Observable.CreateWithState<string, InputField>(inputField, (i, observer) =>
             {
                 observer.OnNext(i.text);
+#if (UNITY_4_6 || UNITY_4_7 || UNITY_5_0 || UNITY_5_1 || UNITY_5_2)
                 return i.onValueChange.AsObservable().Subscribe(observer);
+#else
+                return i.onValueChanged.AsObservable().Subscribe(observer);
+#endif
             });
         }
-#else
+
+#if !(UNITY_4_6 || UNITY_4_7 || UNITY_5_0 || UNITY_5_1 || UNITY_5_2)
         /// <summary>Observe onValueChanged with current `text` value on subscribe.</summary>
         public static IObservable<string> OnValueChangedAsObservable(this InputField inputField)
         {
@@ -102,20 +109,6 @@ namespace UniRx
                 return i.onValueChanged.AsObservable().Subscribe(observer);
             });
         }
-#endif
-
-#if UNITY_5_3_OR_NEWER
-
-        /// <summary>Observe onValueChanged with current `value` on subscribe.</summary>
-        public static IObservable<int> OnValueChangedAsObservable(this Dropdown dropdown)
-        {
-            return Observable.CreateWithState<int, Dropdown>(dropdown, (d, observer) =>
-            {
-                observer.OnNext(d.value);
-                return d.onValueChanged.AsObservable().Subscribe(observer);
-            });
-        }
-
 #endif
     }
 }

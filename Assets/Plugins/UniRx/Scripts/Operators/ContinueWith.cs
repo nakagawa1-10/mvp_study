@@ -56,16 +56,9 @@ namespace UniRx.Operators
             {
                 if (seenValue)
                 {
-                    try
-	                {
-		                var v = parent.selector(lastValue);
-		                // dispose source subscription
-		                serialDisposable.Disposable = v.Subscribe(observer);
-	                }
-	                catch (Exception error)
-	                {
-		                OnError(error);
-	                }
+                    var v = parent.selector(lastValue);
+                    // dispose source subscription
+                    serialDisposable.Disposable = v.Subscribe(observer);
                 }
                 else
                 {

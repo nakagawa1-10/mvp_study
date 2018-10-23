@@ -1,5 +1,4 @@
 ﻿using System;
-using UniRx.InternalUtil;
 
 namespace UniRx.Operators
 {
@@ -37,7 +36,7 @@ namespace UniRx.Operators
                 }
             }
 
-            if (ex != null) ex.Throw();
+            if (ex != null) throw ex;
             if (!seenValue) throw new InvalidOperationException("No Elements.");
 
             return value;

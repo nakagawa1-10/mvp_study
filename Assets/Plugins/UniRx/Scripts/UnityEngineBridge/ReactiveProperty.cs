@@ -1,16 +1,7 @@
-﻿#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-#pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
-#endif
-
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Threading;
 #if !UniRxLibrary
 using UnityEngine;
-#endif
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-using UniRx.Async;
-using UniRx.Async.Internal;
 #endif
 
 namespace UniRx
@@ -19,10 +10,6 @@ namespace UniRx
     {
         T Value { get; }
         bool HasValue { get; }
-
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-        UniTask<T> WaitUntilValueChangedAsync(CancellationToken cancellationToken);
-#endif
     }
 
     public interface IReactiveProperty<T> : IReadOnlyReactiveProperty<T>
@@ -30,56 +17,11 @@ namespace UniRx
         new T Value { get; set; }
     }
 
-    internal interface IObserverLinkedList<T>
-    {
-        void UnsubscribeNode(ObserverNode<T> node);
-    }
-
-    internal sealed class ObserverNode<T> : IObserver<T>, IDisposable
-    {
-        readonly IObserver<T> observer;
-        IObserverLinkedList<T> list;
-
-        public ObserverNode<T> Previous { get; internal set; }
-        public ObserverNode<T> Next { get; internal set; }
-
-        public ObserverNode(IObserverLinkedList<T> list, IObserver<T> observer)
-        {
-            this.list = list;
-            this.observer = observer;
-        }
-
-        public void OnNext(T value)
-        {
-            observer.OnNext(value);
-        }
-
-        public void OnError(Exception error)
-        {
-            observer.OnError(error);
-        }
-
-        public void OnCompleted()
-        {
-            observer.OnCompleted();
-        }
-
-        public void Dispose()
-        {
-            var sourceList = Interlocked.Exchange(ref list, null);
-            if (sourceList != null)
-            {
-                sourceList.UnsubscribeNode(this);
-                sourceList = null;
-            }
-        }
-    }
-
     /// <summary>
     /// Lightweight property broker.
     /// </summary>
     [Serializable]
-    public class ReactiveProperty<T> : IReactiveProperty<T>, IDisposable, IOptimizedObservable<T>, IObserverLinkedList<T>
+    public class ReactiveProperty<T> : IReactiveProperty<T>, IDisposable, IOptimizedObservable<T>
     {
 #if !UniRxLibrary
         static readonly IEqualityComparer<T> defaultEqualityComparer = UnityEqualityComparer.GetDefault<T>();
@@ -87,19 +29,25 @@ namespace UniRx
         static readonly IEqualityComparer<T> defaultEqualityComparer = EqualityComparer<T>.Default;
 #endif
 
+        [NonSerialized]
+        bool canPublishValueOnSubscribe = false;
+
+        [NonSerialized]
+        bool isDisposed = false;
+
 #if !UniRxLibrary
         [SerializeField]
 #endif
         T value = default(T);
 
         [NonSerialized]
-        ObserverNode<T> root;
+        Subject<T> publisher = null;
 
         [NonSerialized]
-        ObserverNode<T> last;
+        IDisposable sourceConnection = null;
 
         [NonSerialized]
-        bool isDisposed = false;
+        Exception lastException = null;
 
         protected virtual IEqualityComparer<T> EqualityComparer
         {
@@ -117,53 +65,69 @@ namespace UniRx
             }
             set
             {
+                if (!canPublishValueOnSubscribe)
+                {
+                    canPublishValueOnSubscribe = true;
+                    SetValue(value);
+
+                    if (isDisposed) return; // don't notify but set value
+                    var p = publisher;
+                    if (p != null)
+                    {
+                        p.OnNext(this.value);
+                    }
+                    return;
+                }
+
                 if (!EqualityComparer.Equals(this.value, value))
                 {
                     SetValue(value);
-                    if (isDisposed)
-                        return;
 
-                    RaiseOnNext(ref value);
+                    if (isDisposed) return;
+                    var p = publisher;
+                    if (p != null)
+                    {
+                        p.OnNext(this.value);
+                    }
                 }
             }
         }
 
-        // always true, allows empty constructor 'can' publish value on subscribe.
-        // because sometimes value is deserialized from UnityEngine.
         public bool HasValue
         {
             get
             {
-                return true;
+                return canPublishValueOnSubscribe;
             }
         }
 
         public ReactiveProperty()
             : this(default(T))
         {
+            // default constructor 'can' publish value on subscribe.
+            // because sometimes value is deserialized from UnityEngine.
         }
 
         public ReactiveProperty(T initialValue)
         {
             SetValue(initialValue);
+            canPublishValueOnSubscribe = true;
         }
 
-        void RaiseOnNext(ref T value)
+        public ReactiveProperty(IObservable<T> source)
         {
-            var node = root;
-            while (node != null)
-            {
-                node.OnNext(value);
-                node = node.Next;
-            }
+            // initialized from source's ReactiveProperty `doesn't` publish value on subscribe.
+            // because there ReactiveProeprty is `Future/Task/Promise`.
 
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-            commonPromise?.InvokeContinuation(ref value);
-            if (removablePromises != null)
-            {
-                PromiseHelper.TrySetResultAll(removablePromises.Values, value);
-            }
-#endif
+            canPublishValueOnSubscribe = false;
+            sourceConnection = source.Subscribe(new ReactivePropertyObserver(this));
+        }
+
+        public ReactiveProperty(IObservable<T> source, T initialValue)
+        {
+            canPublishValueOnSubscribe = false;
+            Value = initialValue; // Value set canPublishValueOnSubcribe = true
+            sourceConnection = source.Subscribe(new ReactivePropertyObserver(this));
         }
 
         protected virtual void SetValue(T value)
@@ -174,56 +138,51 @@ namespace UniRx
         public void SetValueAndForceNotify(T value)
         {
             SetValue(value);
-            if (isDisposed)
-                return;
 
-            RaiseOnNext(ref value);
+            if (isDisposed) return;
+
+            var p = publisher;
+            if (p != null)
+            {
+                p.OnNext(this.value);
+            }
         }
 
         public IDisposable Subscribe(IObserver<T> observer)
         {
+            if (lastException != null)
+            {
+                observer.OnError(lastException);
+                return Disposable.Empty;
+            }
+
             if (isDisposed)
             {
                 observer.OnCompleted();
                 return Disposable.Empty;
             }
 
-            // raise latest value on subscribe
-            observer.OnNext(value);
-
-            // subscribe node, node as subscription.
-            var next = new ObserverNode<T>(this, observer);
-            if (root == null)
+            if (publisher == null)
             {
-                root = last = next;
+                // Interlocked.CompareExchange is bit slower, guarantee threasafety is overkill.
+                // System.Threading.Interlocked.CompareExchange(ref publisher, new Subject<T>(), null);
+                publisher = new Subject<T>();
+            }
+
+            var p = publisher;
+            if (p != null)
+            {
+                var subscription = p.Subscribe(observer);
+                if (canPublishValueOnSubscribe)
+                {
+                    observer.OnNext(value); // raise latest value on subscribe
+                }
+                return subscription;
             }
             else
             {
-                last.Next = next;
-                next.Previous = last;
-                last = next;
-            }
-            return next;
-        }
-
-        void IObserverLinkedList<T>.UnsubscribeNode(ObserverNode<T> node)
-        {
-            if (node == root)
-            {
-                root = node.Next;
-            }
-            if (node == last)
-            {
-                last = node.Previous;
-            }
-
-            if (node.Previous != null)
-            {
-                node.Previous.Next = node.Next;
-            }
-            if (node.Next != null)
-            {
-                node.Next.Previous = node.Previous;
+                observer.OnCompleted();
+                return Disposable.Empty;
             }
         }
 
@@ -235,30 +194,30 @@ namespace UniRx
 
         protected virtual void Dispose(bool disposing)
         {
-            if (isDisposed) return;
-
-            var node = root;
-            root = last = null;
-            isDisposed = true;
-
-            while (node != null)
+            if (!isDisposed)
             {
-                node.OnCompleted();
-                node = node.Next;
-            }
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-            commonPromise?.SetCanceled();
-            commonPromise = null;
-            if (removablePromises != null)
-            {
-                foreach (var item in removablePromises)
+                isDisposed = true;
+                var sc = sourceConnection;
+                if (sc != null)
                 {
-                    item.Value.SetCanceled();
+                    sc.Dispose();
+                    sourceConnection = null;
                 }
-                removablePromises = null;
+                var p = publisher;
+                if (p != null)
+                {
+                    // when dispose, notify OnCompleted
+                    try
+                    {
+                        p.OnCompleted();
+                    }
+                    finally
+                    {
+                        p.Dispose();
+                        publisher = null;
+                    }
+                }
             }
-#endif
-
         }
 
         public override string ToString()
@@ -271,57 +230,55 @@ namespace UniRx
             return false;
         }
 
-
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-
-        static readonly Action<object> Callback = CancelCallback;
-        ReactivePropertyReusablePromise<T> commonPromise;
-        Dictionary<CancellationToken, ReactivePropertyReusablePromise<T>> removablePromises;
-
-        public UniTask<T> WaitUntilValueChangedAsync(CancellationToken cancellationToken)
+        class ReactivePropertyObserver : IObserver<T>
         {
-            if (isDisposed) throw new ObjectDisposedException("ReactiveProperty");
+            readonly ReactiveProperty<T> parent;
+            int isStopped = 0;
 
-            if (!cancellationToken.CanBeCanceled)
+            public ReactivePropertyObserver(ReactiveProperty<T> parent)
             {
-                if (commonPromise != null) return commonPromise.Task;
-                commonPromise = new ReactivePropertyReusablePromise<T>(CancellationToken.None);
-                return commonPromise.Task;
+                this.parent = parent;
             }
 
-            if (removablePromises == null)
+            public void OnNext(T value)
             {
-                removablePromises = new Dictionary<CancellationToken, ReactivePropertyReusablePromise<T>>(CancellationTokenEqualityComparer.Default);
+                parent.Value = value;
             }
 
-            if (removablePromises.TryGetValue(cancellationToken, out var newPromise))
+            public void OnError(Exception error)
             {
-                return newPromise.Task;
+                if (System.Threading.Interlocked.Increment(ref isStopped) == 1)
+                {
+                    parent.lastException = error;
+                    var p = parent.publisher;
+                    if (p != null)
+                    {
+                        p.OnError(error);
+                    }
+                    parent.Dispose(); // complete subscription
+                }
             }
 
-            newPromise = new ReactivePropertyReusablePromise<T>(cancellationToken);
-            removablePromises.Add(cancellationToken, newPromise);
-            cancellationToken.RegisterWithoutCaptureExecutionContext(Callback, Tuple.Create(this, newPromise));
-
-            return newPromise.Task;
+            public void OnCompleted()
+            {
+                if (System.Threading.Interlocked.Increment(ref isStopped) == 1)
+                {
+                    // source was completed but can publish from .Value yet.
+                    var sc = parent.sourceConnection;
+                    parent.sourceConnection = null;
+                    if (sc != null)
+                    {
+                        sc.Dispose();
+                    }
+                }
+            }
         }
-
-        static void CancelCallback(object state)
-        {
-            var tuple = (Tuple<ReactiveProperty<T>, ReactivePropertyReusablePromise<T>>)state;
-            if (tuple.Item1.isDisposed) return;
-
-            tuple.Item2.SetCanceled();
-            tuple.Item1.removablePromises.Remove(tuple.Item2.RegisteredCancelationToken);
-        }
-
-#endif
     }
 
     /// <summary>
     /// Lightweight property broker.
     /// </summary>
-    public class ReadOnlyReactiveProperty<T> : IReadOnlyReactiveProperty<T>, IDisposable, IOptimizedObservable<T>, IObserverLinkedList<T>, IObserver<T>
+    public class ReadOnlyReactiveProperty<T> : IReadOnlyReactiveProperty<T>, IDisposable, IOptimizedObservable<T>
     {
 #if !UniRxLibrary
         static readonly IEqualityComparer<T> defaultEqualityComparer = UnityEqualityComparer.GetDefault<T>();
@@ -330,22 +287,26 @@ namespace UniRx
 #endif
 
         readonly bool distinctUntilChanged = true;
-        bool canPublishValueOnSubscribe = false;
-        bool isDisposed = false;
-        bool isSourceCompleted = false;
 
-        T latestValue = default(T);
+        bool canPublishValueOnSubscribe = false;
+
+        bool isDisposed = false;
+
         Exception lastException = null;
+
+        T value = default(T);
+
+        Subject<T> publisher = null;
+
         IDisposable sourceConnection = null;
 
-        ObserverNode<T> root;
-        ObserverNode<T> last;
+        bool isSourceCompleted = false;
 
         public T Value
         {
             get
             {
-                return latestValue;
+                return value;
             }
         }
 
@@ -367,28 +328,28 @@ namespace UniRx
 
         public ReadOnlyReactiveProperty(IObservable<T> source)
         {
-            this.sourceConnection = source.Subscribe(this);
+            this.sourceConnection = source.Subscribe(new ReadOnlyReactivePropertyObserver(this));
         }
 
         public ReadOnlyReactiveProperty(IObservable<T> source, bool distinctUntilChanged)
         {
             this.distinctUntilChanged = distinctUntilChanged;
-            this.sourceConnection = source.Subscribe(this);
+            this.sourceConnection = source.Subscribe(new ReadOnlyReactivePropertyObserver(this));
         }
 
         public ReadOnlyReactiveProperty(IObservable<T> source, T initialValue)
         {
-            this.latestValue = initialValue;
+            this.value = initialValue;
             this.canPublishValueOnSubscribe = true;
-            this.sourceConnection = source.Subscribe(this);
+            this.sourceConnection = source.Subscribe(new ReadOnlyReactivePropertyObserver(this));
         }
 
         public ReadOnlyReactiveProperty(IObservable<T> source, T initialValue, bool distinctUntilChanged)
         {
             this.distinctUntilChanged = distinctUntilChanged;
-            this.latestValue = initialValue;
+            this.value = initialValue;
             this.canPublishValueOnSubscribe = true;
-            this.sourceConnection = source.Subscribe(this);
+            this.sourceConnection = source.Subscribe(new ReadOnlyReactivePropertyObserver(this));
         }
 
         public IDisposable Subscribe(IObserver<T> observer)
@@ -399,11 +360,17 @@ namespace UniRx
                 return Disposable.Empty;
             }
 
+            if (isDisposed)
+            {
+                observer.OnCompleted();
+                return Disposable.Empty;
+            }
+
             if (isSourceCompleted)
             {
                 if (canPublishValueOnSubscribe)
                 {
-                    observer.OnNext(latestValue);
+                    observer.OnNext(value);
                     observer.OnCompleted();
                     return Disposable.Empty;
                 }
@@ -414,31 +381,29 @@ namespace UniRx
                 }
             }
 
-            if (isDisposed)
+
+            if (publisher == null)
+            {
+                // Interlocked.CompareExchange is bit slower, guarantee threasafety is overkill.
+                // System.Threading.Interlocked.CompareExchange(ref publisher, new Subject<T>(), null);
+                publisher = new Subject<T>();
+            }
+
+            var p = publisher;
+            if (p != null)
+            {
+                var subscription = p.Subscribe(observer);
+                if (canPublishValueOnSubscribe)
+                {
+                    observer.OnNext(value); // raise latest value on subscribe
+                }
+                return subscription;
+            }
+            else
             {
                 observer.OnCompleted();
                 return Disposable.Empty;
             }
-
-            if (canPublishValueOnSubscribe)
-            {
-                observer.OnNext(latestValue);
-            }
-
-            // subscribe node, node as subscription.
-            var next = new ObserverNode<T>(this, observer);
-            if (root == null)
-            {
-                root = last = next;
-            }
-            else
-            {
-                last.Next = next;
-                next.Previous = last;
-                last = next;
-            }
-
-            return next;
         }
 
         public void Dispose()
@@ -449,112 +414,36 @@ namespace UniRx
 
         protected virtual void Dispose(bool disposing)
         {
-            if (isDisposed) return;
-            sourceConnection.Dispose();
-
-            var node = root;
-            root = last = null;
-            isDisposed = true;
-
-            while (node != null)
+            if (!isDisposed)
             {
-                node.OnCompleted();
-                node = node.Next;
-            }
-
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-            commonPromise?.SetCanceled();
-            commonPromise = null;
-            if (removablePromises != null)
-            {
-                foreach (var item in removablePromises)
+                isDisposed = true;
+                var sc = sourceConnection;
+                if (sc != null)
                 {
-                    item.Value.SetCanceled();
+                    sc.Dispose();
+                    sourceConnection = null;
                 }
-                removablePromises = null;
-            }
-#endif
-        }
 
-        void IObserverLinkedList<T>.UnsubscribeNode(ObserverNode<T> node)
-        {
-            if (node == root)
-            {
-                root = node.Next;
-            }
-            if (node == last)
-            {
-                last = node.Previous;
-            }
-
-            if (node.Previous != null)
-            {
-                node.Previous.Next = node.Next;
-            }
-            if (node.Next != null)
-            {
-                node.Next.Previous = node.Previous;
-            }
-        }
-
-        void IObserver<T>.OnNext(T value)
-        {
-            if (isDisposed) return;
-
-            if (canPublishValueOnSubscribe)
-            {
-                if (distinctUntilChanged && EqualityComparer.Equals(this.latestValue, value))
+                var p = publisher;
+                if (p != null)
                 {
-                    return;
+                    // when dispose, notify OnCompleted
+                    try
+                    {
+                        p.OnCompleted();
+                    }
+                    finally
+                    {
+                        p.Dispose();
+                        publisher = null;
+                    }
                 }
             }
-
-            canPublishValueOnSubscribe = true;
-
-            // SetValue
-            this.latestValue = value;
-
-            // call source.OnNext
-            var node = root;
-            while (node != null)
-            {
-                node.OnNext(value);
-                node = node.Next;
-            }
-
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-            commonPromise?.InvokeContinuation(ref value);
-            if (removablePromises != null)
-            {
-                PromiseHelper.TrySetResultAll(removablePromises.Values, value);
-            }
-#endif
-        }
-
-        void IObserver<T>.OnError(Exception error)
-        {
-            lastException = error;
-
-            // call source.OnError
-            var node = root;
-            while (node != null)
-            { 
-                node.OnError(error);
-                node = node.Next;
-            }
-
-            root = last = null;
-        }
-
-        void IObserver<T>.OnCompleted()
-        {
-            isSourceCompleted = true;
-            root = last = null;
         }
 
         public override string ToString()
         {
-            return (latestValue == null) ? "(null)" : latestValue.ToString();
+            return (value == null) ? "(null)" : value.ToString();
         }
 
         public bool IsRequiredSubscribeOnCurrentThread()
@@ -562,50 +451,85 @@ namespace UniRx
             return false;
         }
 
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-
-        static readonly Action<object> Callback = CancelCallback;
-        ReactivePropertyReusablePromise<T> commonPromise;
-        Dictionary<CancellationToken, ReactivePropertyReusablePromise<T>> removablePromises;
-
-        public UniTask<T> WaitUntilValueChangedAsync(CancellationToken cancellationToken)
+        class ReadOnlyReactivePropertyObserver : IObserver<T>
         {
-            if (isDisposed) throw new ObjectDisposedException("ReadOnlyReactiveProperty");
+            readonly ReadOnlyReactiveProperty<T> parent;
+            int isStopped = 0;
 
-            if (!cancellationToken.CanBeCanceled)
+            public ReadOnlyReactivePropertyObserver(ReadOnlyReactiveProperty<T> parent)
             {
-                if (commonPromise != null) return commonPromise.Task;
-                commonPromise = new ReactivePropertyReusablePromise<T>(CancellationToken.None);
-                return commonPromise.Task;
+                this.parent = parent;
             }
 
-            if (removablePromises == null)
+            public void OnNext(T value)
             {
-                removablePromises = new Dictionary<CancellationToken, ReactivePropertyReusablePromise<T>>(CancellationTokenEqualityComparer.Default);
+                if (parent.distinctUntilChanged && parent.canPublishValueOnSubscribe)
+                {
+                    if (!parent.EqualityComparer.Equals(parent.value, value))
+                    {
+                        parent.value = value;
+                        var p = parent.publisher;
+                        if (p != null)
+                        {
+                            p.OnNext(value);
+                        }
+                    }
+                }
+                else
+                {
+                    parent.value = value;
+                    parent.canPublishValueOnSubscribe = true;
+
+                    var p = parent.publisher;
+                    if (p != null)
+                    {
+                        p.OnNext(value);
+                    }
+                }
             }
 
-            if (removablePromises.TryGetValue(cancellationToken, out var newPromise))
+            public void OnError(Exception error)
             {
-                return newPromise.Task;
+                if (System.Threading.Interlocked.Increment(ref isStopped) == 1)
+                {
+                    parent.lastException = error;
+                    var p = parent.publisher;
+                    if (p != null)
+                    {
+                        p.OnError(error);
+                    }
+                    parent.Dispose(); // complete subscription
+                }
             }
 
-            newPromise = new ReactivePropertyReusablePromise<T>(cancellationToken);
-            removablePromises.Add(cancellationToken, newPromise);
-            cancellationToken.RegisterWithoutCaptureExecutionContext(Callback, Tuple.Create(this, newPromise));
+            public void OnCompleted()
+            {
+                if (System.Threading.Interlocked.Increment(ref isStopped) == 1)
+                {
+                    parent.isSourceCompleted = true;
+                    var sc = parent.sourceConnection;
+                    parent.sourceConnection = null;
+                    if (sc != null)
+                    {
+                        sc.Dispose();
+                    }
 
-            return newPromise.Task;
+                    var p = parent.publisher;
+                    parent.publisher = null;
+                    if (p != null)
+                    {
+                        try
+                        {
+                            p.OnCompleted();
+                        }
+                        finally
+                        {
+                            p.Dispose();
+                        }
+                    }
+                }
+            }
         }
-
-        static void CancelCallback(object state)
-        {
-            var tuple = (Tuple<ReadOnlyReactiveProperty<T>, ReactivePropertyReusablePromise<T>>)state;
-            if (tuple.Item1.isDisposed) return;
-
-            tuple.Item2.SetCanceled();
-            tuple.Item1.removablePromises.Remove(tuple.Item2.RegisteredCancelationToken);
-        }
-
-#endif
     }
 
     /// <summary>
@@ -613,30 +537,20 @@ namespace UniRx
     /// </summary>
     public static class ReactivePropertyExtensions
     {
-        public static IReadOnlyReactiveProperty<T> ToReactiveProperty<T>(this IObservable<T> source)
+        public static ReactiveProperty<T> ToReactiveProperty<T>(this IObservable<T> source)
         {
-            return new ReadOnlyReactiveProperty<T>(source);
+            return new ReactiveProperty<T>(source);
         }
 
-        public static IReadOnlyReactiveProperty<T> ToReactiveProperty<T>(this IObservable<T> source, T initialValue)
+        public static ReactiveProperty<T> ToReactiveProperty<T>(this IObservable<T> source, T initialValue)
         {
-            return new ReadOnlyReactiveProperty<T>(source, initialValue);
+            return new ReactiveProperty<T>(source, initialValue);
         }
 
         public static ReadOnlyReactiveProperty<T> ToReadOnlyReactiveProperty<T>(this IObservable<T> source)
         {
             return new ReadOnlyReactiveProperty<T>(source);
         }
-
-#if CSHARP_7_OR_LATER || (UNITY_2018_3_OR_NEWER && (NET_STANDARD_2_0 || NET_4_6))
-
-        public static UniTask<T>.Awaiter GetAwaiter<T>(this IReadOnlyReactiveProperty<T> source)
-        {
-            return source.WaitUntilValueChangedAsync(CancellationToken.None).GetAwaiter();
-        }
-
-#endif
-
 
         /// <summary>
         /// Create ReadOnlyReactiveProperty with distinctUntilChanged: false.
@@ -675,8 +589,7 @@ namespace UniRx
             {
                 foreach (var item in xs)
                 {
-                    if (item == false)
-                        return false;
+                    if (item == false) return false;
                 }
                 return true;
             });
@@ -692,8 +605,7 @@ namespace UniRx
             {
                 foreach (var item in xs)
                 {
-                    if (item == true)
-                        return false;
+                    if (item == true) return false;
                 }
                 return true;
             });

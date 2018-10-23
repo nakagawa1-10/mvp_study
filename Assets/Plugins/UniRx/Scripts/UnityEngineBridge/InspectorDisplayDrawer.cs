@@ -146,24 +146,10 @@ namespace UniRx
         object GetValueRecursive(object obj, int index, string[] paths)
         {
             var path = paths[index];
-
-            FieldInfo fldInfo = null;
-            var type = obj.GetType();
-            while (fldInfo == null)
-            {
-                // attempt to get information about the field
-                fldInfo = type.GetField(path, BindingFlags.IgnoreCase | BindingFlags.GetField | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-                if (fldInfo != null ||
-                    type.BaseType == null || 
-                    type.BaseType.IsSubclassOf(typeof(ReactiveProperty<>))) break;
-
-                // if the field information is missing, it may be in the base class
-                type = type.BaseType;
-            }
+            var fieldInfo = obj.GetType().GetField(path, BindingFlags.IgnoreCase | BindingFlags.GetField | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             // If array, path = Array.data[index]
-            if (fldInfo == null && path == "Array")
+            if (fieldInfo == null && path == "Array")
             {
                 try
                 {
@@ -186,12 +172,12 @@ namespace UniRx
                     throw;
                 }
             }
-            else if (fldInfo == null)
+            else if (fieldInfo == null)
             {
                 throw new Exception("Can't decode path, please report to UniRx's GitHub issues:" + string.Join(", ", paths));
             }
 
-            var v = fldInfo.GetValue(obj);
+            var v = fieldInfo.GetValue(obj);
             if (index < paths.Length - 1)
             {
                 return GetValueRecursive(v, ++index, paths);

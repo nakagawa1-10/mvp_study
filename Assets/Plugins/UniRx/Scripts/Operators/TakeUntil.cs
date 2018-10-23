@@ -23,6 +23,7 @@ namespace UniRx.Operators
         {
             readonly TakeUntilObservable<T, TOther> parent;
             object gate = new object();
+            bool open;
 
             public TakeUntil(TakeUntilObservable<T, TOther> parent, IObserver<T> observer, IDisposable cancel) : base(observer, cancel)
             {
@@ -42,9 +43,16 @@ namespace UniRx.Operators
 
             public override void OnNext(T value)
             {
-                lock (gate)
+                if (open)
                 {
                     observer.OnNext(value);
+                }
+                else
+                {
+                    lock (gate)
+                    {
+                        observer.OnNext(value);
+                    }
                 }
             }
 
@@ -79,15 +87,7 @@ namespace UniRx.Operators
                 {
                     lock (sourceObserver.gate)
                     {
-                        try
-                        {
-                            sourceObserver.observer.OnCompleted();
-                        }
-                        finally
-                        {
-                            sourceObserver.Dispose();
-                            subscription.Dispose();
-                        }
+                        try { sourceObserver.observer.OnCompleted(); } finally { sourceObserver.Dispose(); }
                     }
                 }
 
@@ -95,15 +95,7 @@ namespace UniRx.Operators
                 {
                     lock (sourceObserver.gate)
                     {
-                        try
-                        {
-                            sourceObserver.observer.OnError(error);
-                        }
-                        finally
-                        {
-                            sourceObserver.Dispose();
-                            subscription.Dispose();
-                        }
+                        try { sourceObserver.observer.OnError(error); } finally { sourceObserver.Dispose(); }
                     }
                 }
 
@@ -111,15 +103,8 @@ namespace UniRx.Operators
                 {
                     lock (sourceObserver.gate)
                     {
-                        try
-                        {
-                            sourceObserver.observer.OnCompleted();
-                        }
-                        finally
-                        {
-                            sourceObserver.Dispose();
-                            subscription.Dispose();
-                        }
+                        sourceObserver.open = true;
+                        subscription.Dispose();
                     }
                 }
             }

@@ -100,7 +100,7 @@ namespace UniRx
         bool TryGetValue(TKey key, out TValue value);
 
         IObservable<DictionaryAddEvent<TKey, TValue>> ObserveAdd();
-        IObservable<int> ObserveCountChanged(bool notifyCurrentCount = false);
+        IObservable<int> ObserveCountChanged();
         IObservable<DictionaryRemoveEvent<TKey, TValue>> ObserveRemove();
         IObservable<DictionaryReplaceEvent<TKey, TValue>> ObserveReplace();
         IObservable<Unit> ObserveReset();
@@ -290,19 +290,10 @@ namespace UniRx
 
         [NonSerialized]
         Subject<int> countChanged = null;
-        public IObservable<int> ObserveCountChanged(bool notifyCurrentCount = false)
+        public IObservable<int> ObserveCountChanged()
         {
             if (isDisposed) return Observable.Empty<int>();
-
-            var subject = countChanged ?? (countChanged = new Subject<int>());
-            if (notifyCurrentCount)
-            {
-                return subject.StartWith(() => this.Count);
-            }
-            else
-            {
-                return subject;
-            }
+            return countChanged ?? (countChanged = new Subject<int>());
         }
 
         [NonSerialized]
